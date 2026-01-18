@@ -2662,13 +2662,90 @@ async def unpin_message(chat_id: Union[int, str], message_id: int) -> str:
 async def mark_as_read(chat_id: Union[int, str]) -> str:
     """
     Mark all messages as read in a chat.
+
+    For forum channels (supergroups with topics enabled), this will mark all topics as read.
     """
     try:
         entity = await client.get_entity(chat_id)
-        await client.send_read_acknowledge(entity)
-        return f"Marked all messages as read in chat {chat_id}."
+
+        # Check if this is a forum channel
+        if getattr(entity, 'forum', False):
+            # Get all topics in the forum
+            result = await client(functions.channels.GetForumTopicsRequest(
+                channel=entity,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            ))
+            topics = getattr(result, 'topics', None) or []
+
+            # Mark each topic as read using the top_message as read_max_id
+            for topic in topics:
+                top_message_id = getattr(topic, 'top_message', None)
+                if top_message_id:
+                    await client(functions.messages.ReadDiscussionRequest(
+                        peer=entity,
+                        msg_id=topic.id,
+                        read_max_id=top_message_id
+                    ))
+
+            return f"Marked {len(topics)} topics as read in forum {chat_id}."
+        else:
+            # Standard chat - use existing logic
+            await client.send_read_acknowledge(entity)
+            return f"Marked all messages as read in chat {chat_id}."
     except Exception as e:
         return log_and_format_error("mark_as_read", e, chat_id=chat_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Mark Topic As Read", openWorldHint=True, destructiveHint=True, idempotentHint=True
+    )
+)
+@validate_id("chat_id")
+async def mark_topic_as_read(chat_id: Union[int, str], topic_id: int) -> str:
+    """
+    Mark all messages in a specific forum topic as read.
+
+    Use this for forum/supergroup channels that have topics enabled.
+    The topic_id is the ID of the topic (can be obtained from list_topics).
+    """
+    try:
+        entity = await client.get_entity(chat_id)
+
+        # Fetch the topic to get the top_message ID
+        result = await client(functions.channels.GetForumTopicsRequest(
+            channel=entity,
+            offset_date=0,
+            offset_id=0,
+            offset_topic=0,
+            limit=100
+        ))
+
+        # Find the specific topic
+        topic = None
+        for t in (getattr(result, 'topics', None) or []):
+            if t.id == topic_id:
+                topic = t
+                break
+
+        if not topic:
+            return f"Topic {topic_id} not found in chat {chat_id}."
+
+        top_message_id = getattr(topic, 'top_message', None)
+        if not top_message_id:
+            return f"Topic {topic_id} has no messages to mark as read."
+
+        await client(functions.messages.ReadDiscussionRequest(
+            peer=entity,
+            msg_id=topic_id,
+            read_max_id=top_message_id
+        ))
+        return f"Marked topic {topic_id} as read in chat {chat_id}."
+    except Exception as e:
+        return log_and_format_error("mark_topic_as_read", e, chat_id=chat_id, topic_id=topic_id)
 
 
 @mcp.tool(
